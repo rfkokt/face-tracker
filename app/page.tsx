@@ -11,11 +11,17 @@ export default function NeobrutalistFaceTracker() {
   const [error, setError] = useState("");
   const [cameraPermission, setCameraPermission] = useState<string>("prompt");
   const [tabInactiveCount, setTabInactiveCount] = useState(0);
-  const [noFaceCounter, setNoFaceCounter] = useState(0);
   const [userAgent, setUserAgent] = useState<string | null>(null);
   const [faceCount, setFaceCount] = useState(0);
   const multiFaceTimer = useRef<NodeJS.Timeout | null>(null);
   const [multiFaceCounter, setMultiFaceCounter] = useState(0);
+  const [isLookingAtScreen, setIsLookingAtScreen] = useState<boolean | null>(
+    null
+  );
+  const [expressionDetected, setExpressionDetected] = useState<string | null>(
+    null
+  );
+  const [isRealFace, setIsRealFace] = useState<boolean>(true);
 
   const faceNotDetectedTimer = useRef<NodeJS.Timeout | null>(null);
   const [failureReason, setFailureReason] = useState<null | string>(null);
@@ -140,7 +146,7 @@ export default function NeobrutalistFaceTracker() {
           await videoEl.play();
           console.log("Video playback started");
           setCameraReady(true);
-          startSimpleFaceDetection();
+          startAdvancedFaceDetection();
         } catch (playError) {
           console.error("Video play error:", playError);
           setError(
@@ -170,76 +176,82 @@ export default function NeobrutalistFaceTracker() {
   };
 
   // Simple face detection using basic image analysis
-  const startSimpleFaceDetection = async () => {
+  const startAdvancedFaceDetection = () => {
     if (!videoRef.current) return;
-
     const video = videoRef.current;
 
     detectionInterval.current = setInterval(async () => {
-      if (video.readyState === 4) {
-        const results = await faceapi.detectAllFaces(
-          video,
-          new faceapi.TinyFaceDetectorOptions()
-        );
+      if (video.readyState !== 4) return;
 
-        const count = results.length;
-        setFaceCount(count);
-        setFaceDetected(count > 0); // tetap dipakai
+      const results = await faceapi
+        .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+        .withFaceLandmarks()
+        .withFaceExpressions();
+      const count = results.length;
+      setFaceCount(count);
+      setFaceDetected(count > 0);
+      if (count === 0) {
+        setExpressionDetected(null);
+        setIsLookingAtScreen(null);
+      }
 
-        // 🔥 Deteksi terlalu banyak wajah selama 5 detik
-        if (count > 1) {
-          if (!multiFaceTimer.current) {
-            multiFaceTimer.current = setTimeout(() => {
-              setMultiFaceCounter((prev) => {
-                const updated = prev + 1;
-                if (updated >= 5) {
-                  setFailureReason(
-                    "Terdeteksi lebih dari satu orang dalam frame!"
-                  );
-                }
-                return updated;
-              });
-              multiFaceTimer.current = null;
-            }, 5000);
-          }
+      if (count === 1 && results[0]?.expressions && results[0]?.landmarks) {
+        const exp = results[0].expressions;
+        const maxExp = (
+          Object.keys(exp) as (keyof faceapi.FaceExpressions)[]
+        ).reduce((a, b) => (exp[a] > exp[b] ? a : b));
+        setExpressionDetected(maxExp);
+
+        const landmarks = results[0].landmarks;
+        const jaw = landmarks.getJawOutline?.() || [];
+        const eyeLeft = landmarks.getLeftEye?.() || [];
+        const eyeRight = landmarks.getRightEye?.() || [];
+        const nose = landmarks.getNose?.() || [];
+
+        const isReal =
+          jaw.length > 0 &&
+          eyeLeft.length > 0 &&
+          eyeRight.length > 0 &&
+          nose.length > 0;
+        setIsRealFace(isReal);
+        if (!isReal) setFailureReason("Wajah kemungkinan gambar/foto.");
+
+        // Deteksi arah pandangan mata (kasar)
+        const getAspectRatio = (eye: faceapi.Point[]) => {
+          const width = Math.hypot(eye[3].x - eye[0].x, eye[3].y - eye[0].y);
+          const height = Math.hypot(eye[1].x - eye[5].x, eye[1].y - eye[5].y);
+          return width / height;
+        };
+
+        if (eyeLeft.length >= 6 && eyeRight.length >= 6) {
+          const leftAR = getAspectRatio(eyeLeft);
+          const rightAR = getAspectRatio(eyeRight);
+          const avgAR = (leftAR + rightAR) / 2;
+          const looking = avgAR > 3.0; // threshold bisa kamu sesuaikan
+          setIsLookingAtScreen(looking);
         } else {
-          if (multiFaceTimer.current) {
-            clearTimeout(multiFaceTimer.current);
-            multiFaceTimer.current = null;
-          }
+          setIsLookingAtScreen(null);
         }
+      }
 
-        // 🔲 Tampilkan kotak wajah
-        const canvas = canvasRef.current;
-        if (canvas) {
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return;
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
+      if (count > 1 && !multiFaceTimer.current) {
+        multiFaceTimer.current = setTimeout(() => {
+          setFailureReason("Terdeteksi lebih dari satu wajah dalam frame!");
+          multiFaceTimer.current = null;
+        }, 5000);
+      } else if (count <= 1 && multiFaceTimer.current) {
+        clearTimeout(multiFaceTimer.current);
+        multiFaceTimer.current = null;
+      }
 
-          if (results.length > 0) {
-            results.forEach((face) => {
-              ctx.strokeStyle = "#00ff00";
-              ctx.lineWidth = 3;
-              ctx.strokeRect(
-                face.box.x,
-                face.box.y,
-                face.box.width,
-                face.box.height
-              );
-              ctx.fillStyle = "#00ff00";
-              ctx.font = "16px monospace";
-              ctx.fillText("FACE", face.box.x, face.box.y - 10);
-            });
-          } else {
-            ctx.strokeStyle = "#ff0000";
-            ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
-            ctx.fillStyle = "#ff0000";
-            ctx.font = "16px monospace";
-            ctx.fillText("NO FACE", 20, 40);
-          }
-        }
+      // Kosongkan canvas, tidak render kotak atau teks lagi
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
       }
     }, 200);
   };
@@ -269,7 +281,6 @@ export default function NeobrutalistFaceTracker() {
 
     setCameraReady(false);
     setFaceDetected(false);
-    setNoFaceCounter(0);
     setTabInactiveCount(0); // kalau pakai deteksi tab juga
   };
 
@@ -351,6 +362,22 @@ export default function NeobrutalistFaceTracker() {
                   className="absolute top-0 left-0 w-full h-full pointer-events-none"
                   style={{ mixBlendMode: "screen" }}
                 />
+                {expressionDetected && (
+                  <div className="mt-2 text-center text-lg font-bold text-yellow-300">
+                    Ekspresi: {expressionDetected.toUpperCase()}
+                  </div>
+                )}
+                {isLookingAtScreen !== null && (
+                  <div
+                    className={`mt-2 text-center text-sm font-bold ${
+                      isLookingAtScreen ? "text-green-400" : "text-red-400"
+                    }`}
+                  >
+                    {isLookingAtScreen
+                      ? "✅ Melihat layar"
+                      : "❌ Tidak melihat layar"}
+                  </div>
+                )}
 
                 {/* Video status indicator */}
                 {cameraReady && (
